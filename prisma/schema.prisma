@@ -1,0 +1,245 @@
+// GoRide India – database schema.
+// All monetary columns are Decimal(12,2) (INR). Never use floats for money.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  CUSTOMER
+  ADMIN
+}
+
+enum CarCategory {
+  HATCHBACK
+  SEDAN
+  SUV
+  PREMIUM_SUV
+  LUXURY
+}
+
+enum Transmission {
+  MANUAL
+  AUTOMATIC
+}
+
+enum FuelType {
+  PETROL
+  DIESEL
+  CNG
+  ELECTRIC
+}
+
+enum JourneyType {
+  ONE_WAY
+  ROUND_TRIP
+}
+
+// Lifecycle: PENDING_PAYMENT -> CONFIRMED -> COMPLETED
+//            PENDING_PAYMENT -> EXPIRED | FAILED(retryable) | CANCELLED
+//            CONFIRMED -> CANCELLED
+enum BookingStatus {
+  PENDING_PAYMENT
+  CONFIRMED
+  COMPLETED
+  CANCELLED
+  EXPIRED
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUND_PENDING
+  REFUNDED
+}
+
+model User {
+  id           String    @id @default(cuid())
+  name         String
+  email        String    @unique
+  phone        String?
+  passwordHash String
+  role         Role      @default(CUSTOMER)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  bookings     Booking[]
+  reviews      Review[]
+  auditLogs    AuditLog[]
+
+  @@index([role])
+}
+
+model Car {
+  id              String       @id @default(cuid())
+  model           String
+  brand           String
+  category        CarCategory
+  imageUrl        String
+  seatingCapacity Int
+  luggageCapacity Int // number of standard bags
+  transmission    Transmission
+  fuelType        FuelType
+  isAC            Boolean      @default(true)
+  isActive        Boolean      @default(true)
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+  bookings        Booking[]
+
+  @@unique([brand, model])
+  @@index([category, isActive])
+}
+
+// Configurable fleet capacity per category (MVP). Later: replace with Vehicle/Driver assignment.
+model FleetInventory {
+  id           String      @id @default(cuid())
+  category     CarCategory @unique
+  dailyCapacity Int // number of vehicles of this category that can be on trips on any given day
+  updatedAt    DateTime    @updatedAt
+}
+
+model PricingRule {
+  id              String      @id @default(cuid())
+  carCategory     CarCategory @unique
+  baseFare        Decimal     @db.Decimal(12, 2)
+  pricePerKm      Decimal     @db.Decimal(12, 2)
+  driverAllowance Decimal     @db.Decimal(12, 2) // per day
+  minimumFare     Decimal     @db.Decimal(12, 2)
+  minKmPerDay     Int         @default(250) // round-trip billing floor
+  oneWayReturnFactor Decimal  @db.Decimal(4, 2) @default(1.00) // multiplier applied to one-way km (driver returns empty)
+  isActive        Boolean     @default(true)
+  updatedAt       DateTime    @updatedAt
+}
+
+model Booking {
+  id                 String        @id @default(cuid())
+  bookingReference   String        @unique
+  userId             String
+  carId              String
+  pickupLocation     String
+  dropLocation       String
+  pickupLatitude     Float
+  pickupLongitude    Float
+  dropLatitude       Float
+  dropLongitude      Float
+  journeyType        JourneyType
+  pickupDate         DateTime      @db.Date
+  returnDate         DateTime?     @db.Date
+  pickupTime         String // HH:mm (IST)
+  estimatedDistance  Decimal       @db.Decimal(8, 1) // km
+  estimatedDuration  Int // minutes
+  passengerCount     Int
+  customerName       String
+  customerPhone      String
+  customerEmail      String
+  notes              String?
+  baseFare           Decimal       @db.Decimal(12, 2)
+  additionalCharges  Decimal       @db.Decimal(12, 2)
+  taxes              Decimal       @db.Decimal(12, 2)
+  discount           Decimal       @db.Decimal(12, 2) @default(0)
+  totalAmount        Decimal       @db.Decimal(12, 2)
+  fareSnapshot       Json // full breakdown at time of booking – immutable record
+  couponCode         String?
+  refundAmount       Decimal?      @db.Decimal(12, 2)
+  bookingStatus      BookingStatus @default(PENDING_PAYMENT)
+  paymentStatus      PaymentStatus @default(PENDING)
+  holdExpiresAt      DateTime? // inventory hold for unpaid bookings
+  cancelledAt        DateTime?
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Restrict)
+  car      Car       @relation(fields: [carId], references: [id], onDelete: Restrict)
+  payments Payment[]
+  review   Review?
+
+  @@index([userId, createdAt])
+  @@index([bookingStatus, pickupDate])
+  @@index([pickupDate, bookingStatus])
+  @@index([carId])
+  @@index([holdExpiresAt])
+}
+
+model Payment {
+  id                String        @id @default(cuid())
+  bookingId         String
+  provider          String        @default("razorpay")
+  razorpayOrderId   String        @unique
+  razorpayPaymentId String?       @unique // unique => duplicate verification can't create duplicates
+  amount            Decimal       @db.Decimal(12, 2)
+  currency          String        @default("INR")
+  paymentStatus     PaymentStatus @default(PENDING)
+  paymentMethod     String?
+  failureReason     String?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+
+  @@index([bookingId])
+  @@index([paymentStatus])
+}
+
+// Idempotency ledger for provider webhooks.
+model WebhookEvent {
+  id          String   @id // provider event id (x-razorpay-event-id)
+  provider    String
+  eventType   String
+  processedAt DateTime @default(now())
+}
+
+model Review {
+  id        String   @id @default(cuid())
+  userId    String
+  bookingId String   @unique
+  rating    Int
+  comment   String?
+  createdAt DateTime @default(now())
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model PopularRoute {
+  id            String   @id @default(cuid())
+  fromCity      String
+  toCity        String
+  distanceKm    Int
+  durationMins  Int
+  imageUrl      String?
+  isActive      Boolean  @default(true)
+  sortOrder     Int      @default(0)
+
+  @@unique([fromCity, toCity])
+}
+
+model Coupon {
+  id          String   @id @default(cuid())
+  code        String   @unique
+  percentOff  Int
+  maxDiscount Decimal  @db.Decimal(12, 2)
+  validUntil  DateTime
+  isActive    Boolean  @default(true)
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  actorId   String?
+  action    String
+  entity    String
+  entityId  String
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  actor User? @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([entity, entityId])
+  @@index([createdAt])
+}

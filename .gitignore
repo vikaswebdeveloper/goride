@@ -39,3 +39,10 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# local postgres + test output
+.pgdata/
+test-results/
+playwright-report/
+
+graphify-out/
